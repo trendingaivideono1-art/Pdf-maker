@@ -7,3 +7,4 @@ yt-dlp==2024.8.6
 opencv-python-headless==4.10.0.84
 easyocr==1.7.1
 numpy==1.26.4
+python-bidi==0.4.2
