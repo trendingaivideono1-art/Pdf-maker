@@ -1,4 +1,4 @@
-python-telegram-bot==20.7
+python-telegram-bot==21.9
 youtube-transcript-api==0.6.2
 anthropic==0.49.0
 fpdf2==2.7.9
