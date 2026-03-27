@@ -1,78 +1,127 @@
 """
-Video downloader using yt-dlp
-Downloads only what's needed for frame extraction
+utils/downloader.py
+YouTube video download karo (yt-dlp)
+Railway deployment ke liye — COOKIES_CONTENT env variable support
 """
 
 import os
-import tempfile
 import logging
-import subprocess
+import tempfile
 
 logger = logging.getLogger(__name__)
 
 
-def download_video(url: str, max_height: int = 480) -> str | None:
+def _get_cookies_file() -> str | None:
     """
-    Download YouTube video using yt-dlp.
-    Uses low resolution (480p) to save time and space.
-    Returns path to downloaded video file, or None on failure.
+    Cookies file path return karo.
+    Railway pe COOKIES_CONTENT env variable se temporary file banao.
     """
+
+    # ── Option 1: COOKIES_CONTENT env variable (Railway ke liye best) ──
+    cookies_content = os.getenv("COOKIES_CONTENT")
+    if cookies_content:
+        try:
+            tmp_cookies = tempfile.mktemp(suffix=".txt")
+            with open(tmp_cookies, "w") as f:
+                f.write(cookies_content)
+            logger.info("Cookies file created from COOKIES_CONTENT env variable")
+            return tmp_cookies
+        except Exception as e:
+            logger.warning(f"Cookies file banana fail hua: {e}")
+
+    # ── Option 2: COOKIES_FILE path (agar koi file path diya ho) ────────
+    cookies_file = os.getenv("COOKIES_FILE")
+    if cookies_file and os.path.exists(cookies_file):
+        logger.info(f"Using cookies file: {cookies_file}")
+        return cookies_file
+
+    logger.warning("Koi cookies nahi mili — age-restricted videos fail ho sakti hain")
+    return None
+
+
+def download_video(url: str) -> str | None:
+    """
+    YouTube video download karo OCR ke liye.
+
+    Args:
+        url: YouTube video URL
+
+    Returns:
+        str: Downloaded video file path, ya None if failed
+    """
+    import yt_dlp
+
+    output_path = tempfile.mktemp(suffix=".mp4")
+    cookies_file = _get_cookies_file()
+    tmp_cookies_created = False
+
+    # ── yt-dlp options ─────────────────────────────────────
+    ydl_opts = {
+        "format": "worst[ext=mp4]/worst",  # Sabse chhoti quality (OCR ke liye kaafi)
+        "outtmpl": output_path,
+        "quiet": True,
+        "no_warnings": True,
+        "socket_timeout": 30,
+    }
+
+    if cookies_file:
+        ydl_opts["cookiefile"] = cookies_file
+        # Agar COOKIES_CONTENT se banaya tha to baad mein delete karenge
+        if cookies_file.endswith(".txt") and "tmp" in cookies_file:
+            tmp_cookies_created = True
+
+    # ── Download ───────────────────────────────────────────
     try:
-        tmp_dir = tempfile.mkdtemp(prefix="ytbot_")
-        output_path = os.path.join(tmp_dir, "video.mp4")
-
-        cmd = [
-            "yt-dlp",
-            "--format", f"bestvideo[height<={max_height}][ext=mp4]+bestaudio[ext=m4a]/best[height<={max_height}][ext=mp4]/best[ext=mp4]/best",
-            "--output", output_path,
-            "--no-playlist",
-            "--no-warnings",
-            "--quiet",
-            "--merge-output-format", "mp4",
-            url
-        ]
-
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-
-        if result.returncode != 0:
-            logger.error(f"yt-dlp error: {result.stderr}")
-            return None
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
 
         if os.path.exists(output_path):
-            size_mb = os.path.getsize(output_path) / (1024 * 1024)
-            logger.info(f"Video downloaded: {size_mb:.1f} MB at {output_path}")
+            logger.info(f"Video downloaded: {output_path}")
             return output_path
+        else:
+            logger.error("Download failed: File not found after download")
+            return None
 
-        # yt-dlp sometimes adds extension
-        for f in os.listdir(tmp_dir):
-            if f.startswith("video"):
-                full = os.path.join(tmp_dir, f)
-                logger.info(f"Found video: {full}")
-                return full
+    except yt_dlp.utils.DownloadError as e:
+        error_str = str(e)
 
-        logger.warning("Video file not found after download")
+        if "Sign in" in error_str or "sign in" in error_str:
+            logger.error(
+                "yt-dlp error: Sign-in required!\n"
+                "Railway Fix:\n"
+                "  1. Chrome me 'Get cookies.txt Locally' extension install karein\n"
+                "  2. YouTube pe login karein\n"
+                "  3. Extension se cookies.txt export karein\n"
+                "  4. Railway Dashboard → Variables mein add karein:\n"
+                "     COOKIES_CONTENT = <cookies.txt ka poora content>"
+            )
+        elif "Private video" in error_str:
+            logger.error("yt-dlp error: Private video — download nahi ho sakta")
+        elif "unavailable" in error_str.lower():
+            logger.error("yt-dlp error: Video is region locked / unavailable")
+        else:
+            logger.error(f"yt-dlp error: {e}")
+
         return None
 
-    except subprocess.TimeoutExpired:
-        logger.error("Video download timed out (180s)")
-        return None
-    except FileNotFoundError:
-        logger.error("yt-dlp not installed! Run: pip install yt-dlp")
-        return None
     except Exception as e:
-        logger.error(f"Download error: {e}")
+        logger.error(f"Unexpected download error: {e}")
         return None
+
+    finally:
+        # Temporary cookies file delete karo
+        if tmp_cookies_created and cookies_file and os.path.exists(cookies_file):
+            try:
+                os.unlink(cookies_file)
+            except Exception:
+                pass
 
 
 def cleanup(video_path: str):
-    """Remove downloaded video and its temp directory."""
+    """Downloaded video file delete karo"""
     try:
         if video_path and os.path.exists(video_path):
             os.unlink(video_path)
-            tmp_dir = os.path.dirname(video_path)
-            if tmp_dir.startswith(tempfile.gettempdir()):
-                import shutil
-                shutil.rmtree(tmp_dir, ignore_errors=True)
             logger.info(f"Cleaned up: {video_path}")
     except Exception as e:
-        logger.warning(f"Cleanup error: {e}")
+        logger.warning(f"Cleanup failed: {e}")
