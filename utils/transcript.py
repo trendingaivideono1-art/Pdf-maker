@@ -13,7 +13,7 @@ from youtube_transcript_api._errors import (
 )
 
 logger = logging.getLogger(__name__)
-LANG_PRIORITY = ["en", "hi", "en-IN", "hi-IN", "a.en", "a.hi"]
+LANG_PRIORITY = ["hi", "hi-IN", "a.hi", "en", "en-IN", "a.en"]
 
 
 def extract_video_id(url: str) -> str | None:
@@ -70,7 +70,10 @@ def get_transcript(url: str) -> tuple[str | None, str]:
             return None, title
 
         segments = transcript.fetch()
-        full_text = " ".join(seg["text"] for seg in segments)
+        full_text = " ".join(
+            seg["text"] if isinstance(seg, dict) else seg.text
+            for seg in segments
+        )
         full_text = re.sub(r"\[.*?\]", "", full_text)
         full_text = re.sub(r"\s+", " ", full_text).strip()
 
