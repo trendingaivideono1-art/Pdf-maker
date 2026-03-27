@@ -3,7 +3,7 @@ Board Text Extractor using OpenCV + EasyOCR
 ============================================
 - Extracts frames from video at smart intervals
 - Detects frames where board content changed
-- Runs OCR on unique frames
+- Runs OCR on unique frames (whiteboard + digital board)
 - Returns cleaned, deduplicated board text
 """
 
@@ -16,8 +16,6 @@ logger = logging.getLogger(__name__)
 
 # How many frames to sample per minute of video
 FRAMES_PER_MINUTE = 4
-# Minimum pixel difference to consider a frame "changed"
-CHANGE_THRESHOLD = 0.15
 # Max frames to OCR (to limit processing time)
 MAX_FRAMES_TO_OCR = 40
 
@@ -32,7 +30,7 @@ def extract_board_text(video_path: str) -> str:
         import easyocr
         import numpy as np
     except ImportError as e:
-        logger.error(f"Missing library: {e}. Run: pip install opencv-python easyocr")
+        logger.error(f"Missing library: {e}. Run: pip install opencv-python-headless easyocr")
         return ""
 
     try:
@@ -41,7 +39,7 @@ def extract_board_text(video_path: str) -> str:
             logger.error(f"Cannot open video: {video_path}")
             return ""
 
-        fps        = cap.get(cv2.CAP_PROP_FPS) or 25
+        fps          = cap.get(cv2.CAP_PROP_FPS) or 25
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         duration_sec = total_frames / fps
         duration_min = duration_sec / 60
@@ -50,12 +48,12 @@ def extract_board_text(video_path: str) -> str:
 
         # Calculate frame interval
         sample_count = max(10, min(MAX_FRAMES_TO_OCR, int(duration_min * FRAMES_PER_MINUTE)))
-        interval = max(1, total_frames // sample_count)
+        interval     = max(1, total_frames // sample_count)
 
         logger.info(f"Sampling {sample_count} frames every {interval} frames")
 
         # ── Extract candidate frames ───────────────────────
-        frames = []
+        frames    = []
         prev_hash = None
 
         for i in range(0, total_frames, interval):
@@ -64,17 +62,15 @@ def extract_board_text(video_path: str) -> str:
             if not ret:
                 continue
 
-            # Convert to grayscale for comparison
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-            # Simple hash to detect duplicate frames
+            # Duplicate frame skip
             frame_hash = hashlib.md5(gray.tobytes()[::100]).hexdigest()
             if frame_hash == prev_hash:
                 continue
             prev_hash = frame_hash
 
-            # Check if this frame has significant text region
-            # (look for high contrast areas = whiteboard/blackboard)
+            # Board/screen detect karo
             if has_board_region(gray):
                 frames.append(frame)
 
@@ -90,22 +86,26 @@ def extract_board_text(video_path: str) -> str:
 
         # ── Run EasyOCR ────────────────────────────────────
         reader = easyocr.Reader(
-            ['en', 'hi'],  # English + Hindi
+            ['en', 'hi'],
             gpu=False,
             verbose=False
         )
 
-        all_texts = []
+        all_texts  = []
         seen_lines = set()
 
         for idx, frame in enumerate(frames):
             try:
-                results = reader.readtext(frame, detail=0, paragraph=True)
+                # Preprocess for better OCR
+                processed = preprocess_frame(frame)
+
+                results = reader.readtext(processed, detail=0, paragraph=True)
                 for text in results:
                     cleaned = clean_text(text)
                     if cleaned and cleaned not in seen_lines:
                         seen_lines.add(cleaned)
                         all_texts.append(cleaned)
+
                 logger.info(f"Frame {idx+1}/{len(frames)}: {len(results)} text blocks")
             except Exception as e:
                 logger.warning(f"OCR error on frame {idx}: {e}")
@@ -122,31 +122,61 @@ def extract_board_text(video_path: str) -> str:
 
 def has_board_region(gray_frame) -> bool:
     """
-    Heuristic: Check if frame likely contains a whiteboard/blackboard.
-    Looks for large uniform light or dark regions.
+    Whiteboard, Blackboard aur Digital Board (projector/screen) detect karo.
     """
     try:
         import numpy as np
         import cv2
 
-        h, w = gray_frame.shape
-        # Resize for speed
-        small = cv2.resize(gray_frame, (160, 90))
-
-        # Check for whiteboard: lots of bright pixels
-        white_ratio = np.sum(small > 200) / small.size
-        # Check for blackboard: lots of dark pixels in center
+        small  = cv2.resize(gray_frame, (160, 90))
         center = small[20:70, 40:120]
-        dark_ratio = np.sum(center < 80) / center.size
 
-        # Check for text using edge detection
-        edges = cv2.Canny(small, 50, 150)
+        # Whiteboard: bahut bright
+        white_ratio   = np.sum(small > 200) / small.size
+        # Blackboard: center dark
+        dark_ratio    = np.sum(center < 80) / center.size
+        # ✅ Digital board: medium brightness (projector screen)
+        digital_ratio = np.sum((small > 80) & (small < 220)) / small.size
+
+        # Text edges
+        edges      = cv2.Canny(small, 50, 150)
         edge_ratio = np.sum(edges > 0) / edges.size
 
-        # Board likely if: has white/dark background AND some edges (text)
-        return (white_ratio > 0.3 or dark_ratio > 0.3) and edge_ratio > 0.01
+        has_background = (
+            white_ratio   > 0.3 or
+            dark_ratio    > 0.3 or
+            digital_ratio > 0.5   # Digital board ke liye
+        )
+        has_text = edge_ratio > 0.01
+
+        return has_background and has_text
+
     except Exception:
-        return True  # Default: try OCR anyway
+        return True  # Default: OCR try karo
+
+
+def preprocess_frame(frame):
+    """
+    Frame ko OCR ke liye better banao.
+    Whiteboard + Digital board dono ke liye kaam karta hai.
+    """
+    import cv2
+    import numpy as np
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+    # Sharpen
+    kernel    = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
+    sharpened = cv2.filter2D(gray, -1, kernel)
+
+    # Contrast enhance (CLAHE)
+    clahe    = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(sharpened)
+
+    # Scale up 1.5x — OCR accuracy badhti hai
+    scaled = cv2.resize(enhanced, None, fx=1.5, fy=1.5,
+                        interpolation=cv2.INTER_CUBIC)
+    return scaled
 
 
 def clean_text(text: str) -> str:
@@ -156,11 +186,10 @@ def clean_text(text: str) -> str:
 
     text = text.strip()
 
-    # Remove very short meaningless strings
     if len(text) < 3:
         return ""
 
-    # Remove strings that are all symbols
+    # Mostly symbols → skip
     alpha_count = sum(1 for c in text if c.isalpha())
     if len(text) > 3 and alpha_count < len(text) * 0.3:
         return ""
