@@ -250,7 +250,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ─── Main ──────────────────────────────────────────────────
-async def main():
+def main():
     print("🤖 Smart PDF Bot starting...")
     app = Application.builder().token(TOKEN).build()
 
@@ -261,13 +261,9 @@ async def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print("✅ Bot running! Press Ctrl+C to stop.")
-    async with app:
-        await app.start()
-        await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-        await app.updater.idle()
-        await app.stop()
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    main()
+
