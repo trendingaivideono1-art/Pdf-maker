@@ -1,2 +1,10 @@
 [phases.setup]
-nixPkgs = ["libGL", "libglib"]
+nixPkgs = ["tesseract"]
+
+[phases.install]
+cmds = [
+  "pip install -r requirements.txt",
+  "mkdir -p /usr/share/tessdata",
+  "curl -L https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.traineddata -o /usr/share/tessdata/eng.traineddata",
+  "curl -L https://github.com/tesseract-ocr/tessdata_fast/raw/main/hin.traineddata -o /usr/share/tessdata/hin.traineddata"
+]
