@@ -1,27 +1,19 @@
 """
-YouTube transcript fetcher
-Supports: regular videos, live streams, shorts
+utils/transcript.py
+YouTube transcript fetch karo — 429 error ke liye retry logic ke saath
 """
 
-import re
-import json
+import time
 import logging
-import urllib.request
-from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api._errors import (
-    TranscriptsDisabled, NoTranscriptFound, VideoUnavailable
-)
+import re
 
 logger = logging.getLogger(__name__)
-LANG_PRIORITY = ["hi", "hi-IN", "a.hi", "en", "en-IN", "a.en"]
 
 
 def extract_video_id(url: str) -> str | None:
+    """YouTube URL se video ID nikalo"""
     patterns = [
-        r"(?:v=)([A-Za-z0-9_-]{11})",
-        r"(?:youtu\.be/)([A-Za-z0-9_-]{11})",
-        r"(?:/live/)([A-Za-z0-9_-]{11})",
-        r"(?:shorts/)([A-Za-z0-9_-]{11})",
+        r"(?:v=|youtu\.be/)([A-Za-z0-9_-]{11})",
         r"(?:embed/)([A-Za-z0-9_-]{11})",
     ]
     for pattern in patterns:
@@ -31,58 +23,73 @@ def extract_video_id(url: str) -> str | None:
     return None
 
 
-def get_video_title(video_id: str) -> str:
-    try:
-        url = f"https://www.youtube.com/oembed?url=https://youtu.be/{video_id}&format=json"
-        with urllib.request.urlopen(url, timeout=5) as resp:
-            data = json.loads(resp.read())
-            return data.get("title", "YouTube Video")
-    except Exception:
-        return "YouTube Video"
+def get_transcript(url: str, retries: int = 3, delay: int = 5):
+    """
+    YouTube video ka transcript fetch karo.
+    
+    Returns:
+        tuple: (transcript_text: str, video_title: str)
+    """
+    from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
+    import yt_dlp
 
-
-def get_transcript(url: str) -> tuple[str | None, str]:
-    """Returns (transcript_text, video_title)"""
     video_id = extract_video_id(url)
     if not video_id:
-        return None, "Unknown Video"
+        logger.error("Invalid YouTube URL")
+        return "", "Unknown Video"
 
-    title = get_video_title(video_id)
-
+    # ── Video title fetch ──────────────────────────────────
+    video_title = "YouTube Video"
     try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-        transcript = None
-
-        try:
-            transcript = transcript_list.find_manually_created_transcript(LANG_PRIORITY)
-        except Exception:
-            pass
-
-        if not transcript:
-            try:
-                transcript = transcript_list.find_generated_transcript(LANG_PRIORITY)
-            except Exception:
-                for t in transcript_list:
-                    transcript = t
-                    break
-
-        if not transcript:
-            return None, title
-
-        segments = transcript.fetch()
-        full_text = " ".join(
-            seg["text"] if isinstance(seg, dict) else seg.text
-            for seg in segments
-        )
-        full_text = re.sub(r"\[.*?\]", "", full_text)
-        full_text = re.sub(r"\s+", " ", full_text).strip()
-
-        logger.info(f"Transcript: {len(full_text)} chars for '{title}'")
-        return full_text, title
-
-    except (TranscriptsDisabled, NoTranscriptFound, VideoUnavailable) as e:
-        logger.warning(f"Transcript unavailable: {e}")
-        return None, title
+        ydl_opts = {"quiet": True, "skip_download": True}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            video_title = info.get("title", "YouTube Video")
     except Exception as e:
-        logger.error(f"Transcript error: {e}")
-        return None, title
+        logger.warning(f"Title fetch failed: {e}")
+
+    # ── Transcript fetch with retry ────────────────────────
+    transcript_text = ""
+
+    for attempt in range(retries):
+        try:
+            # Pehle Hindi try karo, phir English
+            try:
+                transcript_list = YouTubeTranscriptApi.get_transcript(
+                    video_id, languages=["hi", "en", "hi-IN", "en-IN"]
+                )
+            except Exception:
+                transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+
+            transcript_text = " ".join([entry["text"] for entry in transcript_list])
+            logger.info(f"Transcript fetched: {len(transcript_text)} chars")
+            break  # Success!
+
+        except TranscriptsDisabled:
+            logger.warning("Transcripts disabled for this video")
+            break  # Retry se kuch nahi hoga
+
+        except NoTranscriptFound:
+            logger.warning("No transcript found for this video")
+            break  # Retry se kuch nahi hoga
+
+        except Exception as e:
+            error_str = str(e)
+
+            if "429" in error_str:
+                # Rate limit — wait karke retry karo
+                wait_time = delay * (attempt + 1)
+                logger.warning(
+                    f"Transcript error (429 - Rate Limited). "
+                    f"Attempt {attempt + 1}/{retries}. "
+                    f"{wait_time}s baad retry karenge..."
+                )
+                if attempt < retries - 1:
+                    time.sleep(wait_time)
+                else:
+                    logger.error("Max retries reached for transcript (429)")
+            else:
+                logger.error(f"Transcript error: {e}")
+                break  # Unknown error — retry nahi karenge
+
+    return transcript_text, video_title
